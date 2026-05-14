@@ -807,3 +807,7 @@ impl Agent {
 #[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent/turn_streaming_tests.rs"]
+mod turn_streaming_tests;

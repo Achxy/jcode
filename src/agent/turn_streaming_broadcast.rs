@@ -200,6 +200,8 @@ impl Agent {
                 std::collections::HashMap::new();
             let store_reasoning_content = self.provider.name() == "openrouter";
             let mut reasoning_content = String::new();
+            let mut reasoning_prefix_emitted = false;
+            let mut reasoning_text_open = false;
             let mut openai_native_compaction: Option<(String, usize)> = None;
             // Track tool_use_id -> name for tool results
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
@@ -253,24 +255,48 @@ impl Agent {
                 };
 
                 match event {
-                    StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingStart => {
+                        reasoning_prefix_emitted = false;
+                        reasoning_text_open = false;
+                    }
+                    StreamEvent::ThinkingEnd => {}
                     StreamEvent::ThinkingDelta(thinking_text) => {
-                        // Only send thinking content if enabled in config
-                        if crate::config::config().display.show_thinking {
-                            let _ = event_tx.send(ServerEvent::TextDelta {
-                                text: format!("💭 {}\n", thinking_text),
-                            });
-                        }
+                        // Store reasoning content first (borrow), before consuming thinking_text
                         if store_reasoning_content {
                             reasoning_content.push_str(&thinking_text);
                         }
+                        // Only send thinking content if enabled in config
+                        if crate::config::config().display.show_thinking {
+                            let text = if reasoning_prefix_emitted {
+                                thinking_text
+                            } else {
+                                reasoning_prefix_emitted = true;
+                                format!("💭 {}", thinking_text.trim_start())
+                            };
+                            if !text.is_empty() {
+                                reasoning_text_open = true;
+                                let _ = event_tx.send(ServerEvent::TextDelta {
+                                    text,
+                                });
+                            }
+                        }
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
-                        let _ = event_tx.send(ServerEvent::TextDelta {
-                            text: format!("Thought for {:.1}s\n", duration_secs),
-                        });
+                        if crate::config::config().display.show_thinking && reasoning_text_open {
+                            let _ = event_tx.send(ServerEvent::TextDelta {
+                                text: format!("\n\n*Thought for {:.1}s*\n\n", duration_secs),
+                            });
+                            reasoning_text_open = false;
+                        }
                     }
                     StreamEvent::TextDelta(text) => {
+                        // Close open reasoning block before normal text
+                        if crate::config::config().display.show_thinking && reasoning_text_open {
+                            let _ = event_tx.send(ServerEvent::TextDelta {
+                                text: "\n\n".to_string(),
+                            });
+                            reasoning_text_open = false;
+                        }
                         text_content.push_str(&text);
                         if !text_wrapped_detected {
                             if let Some(marker_idx) = text_content
@@ -289,6 +315,13 @@ impl Agent {
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        // Close open reasoning block before tool display
+                        if crate::config::config().display.show_thinking && reasoning_text_open {
+                            let _ = event_tx.send(ServerEvent::TextDelta {
+                                text: "\n\n".to_string(),
+                            });
+                            reasoning_text_open = false;
+                        }
                         let _ = event_tx.send(ServerEvent::ToolStart {
                             id: id.clone(),
                             name: name.clone(),
